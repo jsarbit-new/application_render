@@ -328,8 +328,8 @@ def main():
 
                     st.markdown("---")
                     
-                    # AJOUT D'UN SPINNER EXPLICITE POUR CETTE OPÉRATION LONGUE
-                    with st.spinner("Génération du rapport de dérive des données (Evidently)... Cela peut prendre quelques dizaines de secondes."):
+                    # --- MODIFICATION CLÉ : RÉDUCTION DE L'ÉCHANTILLON À 10 LIGNES ---
+                    with st.spinner("Génération du rapport de dérive des données (Evidently)... Cela peut prendre quelques instants."):
                         st.write("**Analyse de Data Drift (Evidently AI)**")
 
                         reference_data_for_drift = X_train_processed_df
@@ -337,13 +337,14 @@ def main():
 
                         # La logique pour dupliquer la ligne est toujours nécessaire si les données actuelles n'ont qu'une seule ligne
                         if len(current_data_for_drift) == 1:
-                            current_data_for_drift = pd.concat([current_data_for_drift] * 5, ignore_index=True)
+                            # Création d'un petit échantillon de 10 lignes à partir de la ligne unique
+                            current_data_for_drift = pd.concat([current_data_for_drift] * 10, ignore_index=True)
 
                         data_drift_report = Report(metrics=[DataDriftPreset()])
                         
-                        # --- MODIFICATION CLÉ : RÉDUCTION DE L'ÉCHANTILLON À 100 LIGNES ---
+                        # Exécution du rapport avec un échantillon de référence de 10 lignes
                         data_drift_report.run(
-                            reference_data=reference_data_for_drift.sample(n=min(100, len(reference_data_for_drift))),
+                            reference_data=reference_data_for_drift.sample(n=min(10, len(reference_data_for_drift))),
                             current_data=current_data_for_drift)
 
                         with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as tmpfile:
