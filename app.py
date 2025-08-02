@@ -273,30 +273,60 @@ def main():
     with tab2:
         st.subheader("Simulation personnalisée")
         with st.form("simulation_form"):
-            st.write("Modifiez les valeurs des 10 features les plus importantes pour simuler un nouveau client:")
+            st.write("Modifiez les valeurs des 10 features ci-dessous pour simuler un nouveau client:")
+
+            # Définition des features à utiliser pour la simulation et leurs libellés
+            simulation_features = {
+                "AMT_CREDIT": "Montant du prêt",
+                "AMT_ANNUITY": "Montant Annuité",
+                "PAYMENT_RATE": "Ratio Crédit/Annuité",
+                "DAYS_EMPLOYED": "Ancienneté emploi (jours)",
+                "REGION_POPULATION_RELATIVE": "Taux de population région",
+                "EXT_SOURCE_1": "Source Extérieure 1",
+                "EXT_SOURCE_2": "Source Extérieure 2",
+                "EXT_SOURCE_3": "Source Extérieure 3",
+                "CNT_CHILDREN": "Nombre d'enfants",
+                "DAYS_BIRTH": "Âge client (jours)"
+            }
 
             # Initialisation du dictionnaire avec les valeurs par défaut
             default_values = X_train_raw.iloc[0].to_dict()
 
             editable_features = {}
-            for col in top_10_features:
+            for col, label in simulation_features.items():
                 if col in X_train_raw.columns:
-                    # Assurez-vous que la valeur par défaut est du même type que le min/max du slider
-                    default_value_for_slider = float(default_values.get(col, X_train_raw[col].mean()))
-                    min_val = float(X_train_raw[col].min())
-                    max_val = float(X_train_raw[col].max())
-
-                    editable_features[col] = st.slider(
-                        col.replace('_', ' ').title(),
-                        min_val, max_val, default_value_for_slider
-                    )
+                    min_val = X_train_raw[col].min()
+                    max_val = X_train_raw[col].max()
+                    default_value = default_values.get(col, X_train_raw[col].mean())
+                    
+                    st.write(f"**{label}**")
+                    st.write(f"  *Plage de valeurs possibles : de {min_val:.2f} à {max_val:.2f}*")
+                    
+                    # Correction pour les types de données
+                    if X_train_raw[col].dtype in ['int64', 'int32']:
+                        value_input = st.number_input(
+                            'Entrez une valeur',
+                            value=int(default_value),
+                            min_value=int(min_val),
+                            max_value=int(max_val),
+                            key=col
+                        )
+                    else:
+                        value_input = st.number_input(
+                            'Entrez une valeur',
+                            value=float(default_value),
+                            min_value=float(min_val),
+                            max_value=float(max_val),
+                            key=col
+                        )
+                    editable_features[col] = value_input
 
             if st.form_submit_button("Prédire le risque"):
                 with st.spinner("Simulation en cours..."):
                     # Création du DataFrame de simulation avec les valeurs par défaut
                     sim_data_raw = pd.DataFrame([default_values])
 
-                    # Mise à jour des valeurs avec les sliders
+                    # Mise à jour des valeurs avec les inputs
                     for feat, val in editable_features.items():
                         sim_data_raw.loc[0, feat] = val
                     
