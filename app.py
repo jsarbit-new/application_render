@@ -19,6 +19,7 @@ from evidently.metric_preset import DataDriftPreset
 import warnings
 import tempfile
 import joblib
+from functools import lru_cache
 
 # Supprimer les avertissements pour une meilleure lisibilité
 warnings.filterwarnings('ignore', category=UserWarning, module='shap')
@@ -76,18 +77,18 @@ def load_s3_model_pipeline():
     s3_client = init_s3()
     if s3_client is None:
         st.stop()
-        
+
     try:
         st.info(f"Chargement du modèle depuis s3://{BUCKET_NAME}/{S3_MODEL_KEY}")
-        
+
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_file_path = os.path.join(temp_dir, "model.pkl")
-            
+
             s3_client.download_file(BUCKET_NAME, S3_MODEL_KEY, temp_file_path)
             pipeline = joblib.load(temp_file_path)
-            
+
         st.success("Pipeline chargé avec succès depuis S3.")
-        
+
         feature_names = None
         if isinstance(pipeline, Pipeline):
             try:
@@ -97,9 +98,9 @@ def load_s3_model_pipeline():
             except Exception as e:
                 st.warning(f"Impossible de récupérer les noms de features du pipeline. Erreur: {e}")
                 feature_names = None
-                
+
         return pipeline, feature_names
-        
+
     except ClientError as e:
         st.error(f"Erreur S3 : {e.response['Error']['Message']}")
         st.error("Vérifiez le nom du bucket et le chemin du modèle (S3_MODEL_KEY).")
@@ -118,18 +119,18 @@ def train_explainer_model(_preprocessor, X_raw, y):
     et retourne les données prétraitées avec les noms de features.
     """
     st.info("Entraînement d'un modèle local pour l'explicabilité (SHAP)...")
-    
+
     # Prétraitement des données
     X_processed = _preprocessor.transform(X_raw)
-    
+
     # Création du DataFrame avec les noms de features pour SHAP
     feature_names = [f.split('__')[-1] for f in _preprocessor.get_feature_names_out()]
     X_processed_df = pd.DataFrame(X_processed, columns=feature_names, index=X_raw.index)
-    
+
     # Entraînement du modèle
     model = LogisticRegression(solver='liblinear', random_state=42)
     model.fit(X_processed_df, y.squeeze())
-    
+
     st.success("Modèle SHAP local et données prétraitées pour l'explainer sont prêts.")
     return model, X_processed_df
 
@@ -140,9 +141,22 @@ def create_explainer(_model, _data):
 
 @st.cache_resource
 def generate_global_shap_plots(_explainer, _data):
-    """Génère les plots SHAP globaux (Beeswarm et Bar)"""
-    shap_images = {}
+    """Génère les plots SHAP globaux (Beeswarm et Bar) et retourne les 10 features les plus importantes."""
     shap_values = _explainer(_data)
+
+    # Récupération des 10 features les plus importantes
+    if hasattr(shap_values, 'abs'):
+        feature_importance_df = pd.DataFrame({
+            'feature': _data.columns,
+            'importance': np.abs(shap_values.values).mean(0)
+        })
+        top_10_features = feature_importance_df.sort_values(by='importance', ascending=False)['feature'].head(10).tolist()
+    else:
+        # Fallback si l'objet shap_values n'est pas un Explainer standard
+        top_10_features = _data.columns.tolist()[:10]
+
+    # Génération des images
+    shap_images = {}
 
     # Beeswarm Plot
     fig_beeswarm = plt.figure(figsize=(15, 8))
@@ -150,16 +164,15 @@ def generate_global_shap_plots(_explainer, _data):
     plt.title("Importance globale des features (Beeswarm Plot)")
     plt.tight_layout()
     shap_images['beeswarm_plot'] = fig_beeswarm
-    
+
     # Bar Plot
     fig_bar = plt.figure(figsize=(15, 8))
     shap.plots.bar(shap_values.abs.mean(0), max_display=20, show=False)
     plt.title("Importance moyenne globale des features (Bar Plot)")
     plt.tight_layout()
     shap_images['bar_plot'] = fig_bar
-    
-    return shap_images
 
+    return shap_images, top_10_features
 
 # --- Main App ---
 def main():
@@ -175,7 +188,7 @@ def main():
         y_train = load_s3_parquet(s3, "y_train.parquet")
         if X_train_raw is None or y_train is None:
             st.stop()
-        
+
         prediction_pipeline, feature_names = load_s3_model_pipeline()
         if prediction_pipeline is None:
             st.stop()
@@ -184,13 +197,14 @@ def main():
         if preprocessor is None:
             st.error("Le pipeline MLflow n'a pas d'étape 'preprocessor'.")
             st.stop()
-            
+
         explainer_model, X_train_processed_df = train_explainer_model(preprocessor, X_train_raw, y_train)
 
         explainer = create_explainer(explainer_model, X_train_processed_df)
         expected_value = explainer.expected_value
-        
-        shap_images = generate_global_shap_plots(explainer, X_train_processed_df)
+
+        # Récupération des plots et des 10 features les plus importantes
+        shap_images, top_10_features = generate_global_shap_plots(explainer, X_train_processed_df)
 
     st.success("Toutes les ressources sont chargées avec succès !")
     st.markdown("---")
@@ -202,19 +216,19 @@ def main():
         st.subheader("Analyse d'un client existant")
         client_id_list = X_train_raw.index.tolist()
         client_id = st.sidebar.selectbox("Sélectionnez un ID client:", client_id_list, index=0)
-        
+
         client_data_raw = X_train_raw.loc[[client_id]]
 
         if st.button("Calculer le risque pour ce client"):
             with st.spinner("Calcul en cours..."):
                 # PRÉDICTION : Utilise le pipeline MLflow
                 proba = prediction_pipeline.predict_proba(client_data_raw)[0][1]
-                
+
                 # EXPLICATION : Utilise le modèle local de l'explainer
                 client_data_processed = preprocessor.transform(client_data_raw)
                 client_data_processed_df = pd.DataFrame(client_data_processed, columns=X_train_processed_df.columns)
                 shap_values = explainer(client_data_processed_df)
-                
+
                 st.subheader("Résultat de la prédiction")
                 col1, col2 = st.columns(2)
                 with col1:
@@ -224,7 +238,7 @@ def main():
                         st.error("❌ Décision : Prêt refusé")
                     else:
                         st.success("✅ Décision : Prêt accordé")
-                
+
                 with col2:
                     fig_gauge = go.Figure(
                         go.Indicator(
@@ -239,10 +253,10 @@ def main():
                         )
                     )
                     st.plotly_chart(fig_gauge)
-                    
+
                 st.markdown("---")
                 st.subheader("Explication de la prédiction (SHAP)")
-                
+
                 st.write("**Explication locale (Waterfall Plot)**")
                 fig_shap_waterfall = plt.figure(figsize=(12, 6))
                 shap.plots.waterfall(shap_values[0], max_display=10, show=False)
@@ -259,39 +273,46 @@ def main():
     with tab2:
         st.subheader("Simulation personnalisée")
         with st.form("simulation_form"):
-            st.write("Modifiez les valeurs pour simuler un nouveau client:")
-            
+            st.write("Modifiez les valeurs des 10 features les plus importantes pour simuler un nouveau client:")
+
+            # Initialisation du dictionnaire avec les valeurs par défaut
             default_values = X_train_raw.iloc[0].to_dict()
-            
-            important_features = [
-                'EXT_SOURCE_2', 'DAYS_BIRTH', 'EXT_SOURCE_3', 'DAYS_EMPLOYED',
-                'AMT_CREDIT', 'AMT_ANNUITY', 'AMT_GOODS_PRICE', 'AMT_INCOME_TOTAL',
-                'DAYS_ID_PUBLISH', 'REGION_POPULATION_RELATIVE'
-            ]
-            
+
             editable_features = {}
-            for col in important_features:
+            for col in top_10_features:
                 if col in X_train_raw.columns:
+                    # Assurez-vous que la valeur par défaut est du même type que le min/max du slider
+                    default_value_for_slider = float(default_values.get(col, X_train_raw[col].mean()))
+                    min_val = float(X_train_raw[col].min())
+                    max_val = float(X_train_raw[col].max())
+
                     editable_features[col] = st.slider(
                         col.replace('_', ' ').title(),
-                        float(X_train_raw[col].min()), float(X_train_raw[col].max()), float(default_values[col])
+                        min_val, max_val, default_value_for_slider
                     )
-            
+
             if st.form_submit_button("Prédire le risque"):
                 with st.spinner("Simulation en cours..."):
+                    # Création du DataFrame de simulation avec les valeurs par défaut
                     sim_data_raw = pd.DataFrame([default_values])
 
+                    # Mise à jour des valeurs avec les sliders
                     for feat, val in editable_features.items():
                         sim_data_raw.loc[0, feat] = val
+                    
+                    # Correction des types de colonnes
+                    sim_data_raw = sim_data_raw.astype(X_train_raw.dtypes)
 
+                    # PRÉDICTION
                     proba = prediction_pipeline.predict_proba(sim_data_raw)[0][1]
                     st.success(f"**Probabilité de défaut estimée : {proba:.2%}**")
 
+                    # EXPLICATION SHAP
                     sim_data_processed = preprocessor.transform(sim_data_raw)
                     sim_data_processed_df = pd.DataFrame(sim_data_processed, columns=X_train_processed_df.columns)
-                    
+
                     shap_values = explainer(sim_data_processed_df)
-                    
+
                     st.write("**Explication de la prédiction pour le client simulé (Waterfall Plot)**")
                     fig_shap_waterfall_sim = plt.figure(figsize=(12, 6))
                     shap.plots.waterfall(shap_values[0], max_display=10, show=False)
@@ -306,29 +327,35 @@ def main():
                         st.pyplot(shap_images['bar_plot'], bbox_inches='tight')
 
                     st.markdown("---")
-                    st.write("**Analyse de Data Drift (Evidently AI)**")
                     
-                    reference_data_for_drift = X_train_processed_df
-                    
-                    current_data_for_drift = sim_data_processed_df
-                    if len(current_data_for_drift) == 1:
-                        current_data_for_drift = pd.concat([current_data_for_drift] * 5, ignore_index=True)
+                    # AJOUT D'UN SPINNER EXPLICITE POUR CETTE OPÉRATION LONGUE
+                    with st.spinner("Génération du rapport de dérive des données (Evidently)... Cela peut prendre quelques dizaines de secondes."):
+                        st.write("**Analyse de Data Drift (Evidently AI)**")
 
-                    data_drift_report = Report(metrics=[DataDriftPreset()])
-                    data_drift_report.run(
-                        reference_data=reference_data_for_drift.sample(n=min(1000, len(reference_data_for_drift))), 
-                        current_data=current_data_for_drift)
-                    
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as tmpfile:
-                        data_drift_report.save_html(tmpfile.name)
-                    
-                    try:
-                        with open(tmpfile.name, 'r', encoding='utf-8') as f:
-                            report_html_content = f.read()
+                        reference_data_for_drift = X_train_processed_df
+                        current_data_for_drift = sim_data_processed_df
+
+                        # La logique pour dupliquer la ligne est toujours nécessaire si les données actuelles n'ont qu'une seule ligne
+                        if len(current_data_for_drift) == 1:
+                            current_data_for_drift = pd.concat([current_data_for_drift] * 5, ignore_index=True)
+
+                        data_drift_report = Report(metrics=[DataDriftPreset()])
                         
-                        st.components.v1.html(report_html_content, height=500, scrolling=True)
-                    finally:
-                        os.remove(tmpfile.name)
+                        # --- MODIFICATION CLÉ : RÉDUCTION DE L'ÉCHANTILLON À 100 LIGNES ---
+                        data_drift_report.run(
+                            reference_data=reference_data_for_drift.sample(n=min(100, len(reference_data_for_drift))),
+                            current_data=current_data_for_drift)
+
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as tmpfile:
+                            data_drift_report.save_html(tmpfile.name)
+
+                        try:
+                            with open(tmpfile.name, 'r', encoding='utf-8') as f:
+                                report_html_content = f.read()
+
+                            st.components.v1.html(report_html_content, height=500, scrolling=True)
+                        finally:
+                            os.remove(tmpfile.name)
 
 if __name__ == "__main__":
     main()
