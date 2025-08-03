@@ -14,8 +14,9 @@ import matplotlib
 import json
 from PIL import Image
 import plotly.graph_objects as go
-from evidently.report import Report
-from evidently.metric_preset import DataDriftPreset
+# Les imports Evidently ne sont plus nécessaires pour le dashboard
+# from evidently.report import Report
+# from evidently.metric_preset import DataDriftPreset
 import warnings
 import tempfile
 import joblib
@@ -357,36 +358,35 @@ def main():
                         st.pyplot(shap_images['bar_plot'], bbox_inches='tight')
 
                     st.markdown("---")
+
+                    # --- ANCIENNE LOGIQUE DE GÉNÉRATION DU RAPPORT (SUPPRIMÉE) ---
+                    # with st.spinner("Génération du rapport de dérive des données (Evidently)... Cela peut prendre quelques instants."):
+                    #     st.write("**Analyse de Data Drift (Evidently AI)**")
+                    #     reference_data_for_drift = X_train_processed_df
+                    #     current_data_for_drift = sim_data_processed_df
+                    #     if len(current_data_for_drift) == 1:
+                    #         current_data_for_drift = pd.concat([current_data_for_drift] * 10, ignore_index=True)
+                    #     data_drift_report = Report(metrics=[DataDriftPreset()])
+                    #     data_drift_report.run(
+                    #         reference_data=reference_data_for_drift.sample(n=min(10, len(reference_data_for_drift))),
+                    #         current_data=current_data_for_drift)
+                    #     with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as tmpfile:
+                    #         data_drift_report.save_html(tmpfile.name)
+                    #     try:
+                    #         with open(tmpfile.name, 'r', encoding='utf-8') as f:
+                    #             report_html_content = f.read()
+                    #         st.components.v1.html(report_html_content, height=500, scrolling=True)
+                    #     finally:
+                    #         os.remove(tmpfile.name)
+
+                    # --- NOUVELLE LOGIQUE : AFFICHAGE D'UN LIEN VERS LE FICHIER SUR S3 ---
+                    st.write("**Analyse de Data Drift (Evidently AI)**")
+                    st.info("Le rapport de dérive des données est généré séparément pour optimiser les ressources. Vous pouvez le consulter en cliquant sur le lien ci-dessous.")
                     
-                    # --- MODIFICATION CLÉ : RÉDUCTION DE L'ÉCHANTILLON À 10 LIGNES ---
-                    with st.spinner("Génération du rapport de dérive des données (Evidently)... Cela peut prendre quelques instants."):
-                        st.write("**Analyse de Data Drift (Evidently AI)**")
+                    # Assurez-vous que le nom du fichier ici correspond à celui que vous avez téléchargé sur S3.
+                    evidently_report_url = f"https://{BUCKET_NAME}.s3.{os.getenv('AWS_REGION', 'eu-north-1')}.amazonaws.com/reports/evidently_report_10_lignes.html"
+                    st.markdown(f"**[Accéder au rapport Evidently]({evidently_report_url})**")
 
-                        reference_data_for_drift = X_train_processed_df
-                        current_data_for_drift = sim_data_processed_df
-
-                        # La logique pour dupliquer la ligne est toujours nécessaire si les données actuelles n'ont qu'une seule ligne
-                        if len(current_data_for_drift) == 1:
-                            # Création d'un petit échantillon de 10 lignes à partir de la ligne unique
-                            current_data_for_drift = pd.concat([current_data_for_drift] * 10, ignore_index=True)
-
-                        data_drift_report = Report(metrics=[DataDriftPreset()])
-                        
-                        # Exécution du rapport avec un échantillon de référence de 10 lignes
-                        data_drift_report.run(
-                            reference_data=reference_data_for_drift.sample(n=min(10, len(reference_data_for_drift))),
-                            current_data=current_data_for_drift)
-
-                        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as tmpfile:
-                            data_drift_report.save_html(tmpfile.name)
-
-                        try:
-                            with open(tmpfile.name, 'r', encoding='utf-8') as f:
-                                report_html_content = f.read()
-
-                            st.components.v1.html(report_html_content, height=500, scrolling=True)
-                        finally:
-                            os.remove(tmpfile.name)
 
 if __name__ == "__main__":
     main()
