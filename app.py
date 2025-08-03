@@ -1,31 +1,21 @@
 import streamlit as st
 import pandas as pd
-import mlflow
-import shap
-import matplotlib.pyplot as plt
 import numpy as np
 import os
 from io import BytesIO
 import boto3
 from botocore.exceptions import ClientError
 from sklearn.pipeline import Pipeline
-from sklearn.linear_model import LogisticRegression
 import matplotlib
-import json
-from PIL import Image
 import plotly.graph_objects as go
-# Les imports Evidently ne sont plus nécessaires pour le dashboard
-# from evidently.report import Report
-# from evidently.metric_preset import DataDriftPreset
 import warnings
 import tempfile
 import joblib
 from functools import lru_cache
 
-# Supprimer les avertissements pour une meilleure lisibilité
-warnings.filterwarnings('ignore', category=UserWarning, module='shap')
+# Supprimer les avertissements
+warnings.filterwarnings('ignore', category=UserWarning)
 warnings.filterwarnings('ignore', category=FutureWarning)
-warnings.filterwarnings('ignore', message="X does not have valid feature names")
 matplotlib.use('Agg')
 
 # --- Configuration ---
@@ -36,6 +26,11 @@ BUCKET_NAME = os.getenv('AWS_S3_BUCKET_NAME')
 S3_PREFIX_DATA = "input/"
 S3_MODEL_KEY = "modele_mlflow_final/model/model.pkl"
 MLFLOW_URI = os.getenv('MLFLOW_TRACKING_URI')
+
+# URLs vers les images SHAP et le rapport Evidently sur S3
+S3_SHAP_BEESWARM_URL = f"https://{BUCKET_NAME}.s3.{os.getenv('AWS_REGION', 'eu-north-1')}.amazonaws.com/reports/shap_beeswarm.png"
+S3_SHAP_BAR_URL = f"https://{BUCKET_NAME}.s3.{os.getenv('AWS_REGION', 'eu-north-1')}.amazonaws.com/reports/shap_bar.png"
+S3_EVIDENTLY_REPORT_URL = f"https://{BUCKET_NAME}.s3.{os.getenv('AWS_REGION', 'eu-north-1')}.amazonaws.com/reports/evidently_report_10_lignes.html"
 
 # --- Helpers S3 ---
 @st.cache_resource
@@ -73,7 +68,6 @@ def load_s3_parquet(_s3, key):
 def load_s3_model_pipeline():
     """
     Charge le pipeline MLflow complet depuis S3 en utilisant joblib.
-    Utilise un fichier temporaire pour éviter les problèmes de streaming.
     """
     s3_client = init_s3()
     if s3_client is None:
@@ -81,99 +75,21 @@ def load_s3_model_pipeline():
 
     try:
         st.info(f"Chargement du modèle depuis s3://{BUCKET_NAME}/{S3_MODEL_KEY}")
-
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_file_path = os.path.join(temp_dir, "model.pkl")
-
             s3_client.download_file(BUCKET_NAME, S3_MODEL_KEY, temp_file_path)
             pipeline = joblib.load(temp_file_path)
-
         st.success("Pipeline chargé avec succès depuis S3.")
-
-        feature_names = None
-        if isinstance(pipeline, Pipeline):
-            try:
-                preprocessor = pipeline.named_steps['preprocessor']
-                feature_names = preprocessor.get_feature_names_out()
-                feature_names = [f.split('__')[-1] for f in feature_names]
-            except Exception as e:
-                st.warning(f"Impossible de récupérer les noms de features du pipeline. Erreur: {e}")
-                feature_names = None
-
-        return pipeline, feature_names
-
+        return pipeline
     except ClientError as e:
         st.error(f"Erreur S3 : {e.response['Error']['Message']}")
         st.error("Vérifiez le nom du bucket et le chemin du modèle (S3_MODEL_KEY).")
         st.stop()
-        return None, None
+        return None
     except Exception as e:
         st.error(f"Erreur lors du chargement du pipeline depuis S3: {str(e)}")
         st.stop()
-        return None, None
-
-# --- Helpers SHAP ---
-@st.cache_resource
-def train_explainer_model(_preprocessor, X_raw, y):
-    """
-    Entraîne un nouveau modèle de régression logistique pour l'explicabilité
-    et retourne les données prétraitées avec les noms de features.
-    """
-    st.info("Entraînement d'un modèle local pour l'explicabilité (SHAP)...")
-
-    # Prétraitement des données
-    X_processed = _preprocessor.transform(X_raw)
-
-    # Création du DataFrame avec les noms de features pour SHAP
-    feature_names = [f.split('__')[-1] for f in _preprocessor.get_feature_names_out()]
-    X_processed_df = pd.DataFrame(X_processed, columns=feature_names, index=X_raw.index)
-
-    # Entraînement du modèle
-    model = LogisticRegression(solver='liblinear', random_state=42)
-    model.fit(X_processed_df, y.squeeze())
-
-    st.success("Modèle SHAP local et données prétraitées pour l'explainer sont prêts.")
-    return model, X_processed_df
-
-@st.cache_resource
-def create_explainer(_model, _data):
-    """Crée l'explainer SHAP une seule fois."""
-    return shap.Explainer(_model, _data)
-
-@st.cache_resource
-def generate_global_shap_plots(_explainer, _data):
-    """Génère les plots SHAP globaux (Beeswarm et Bar) et retourne les 10 features les plus importantes."""
-    shap_values = _explainer(_data)
-
-    # Récupération des 10 features les plus importantes
-    if hasattr(shap_values, 'abs'):
-        feature_importance_df = pd.DataFrame({
-            'feature': _data.columns,
-            'importance': np.abs(shap_values.values).mean(0)
-        })
-        top_10_features = feature_importance_df.sort_values(by='importance', ascending=False)['feature'].head(10).tolist()
-    else:
-        # Fallback si l'objet shap_values n'est pas un Explainer standard
-        top_10_features = _data.columns.tolist()[:10]
-
-    # Génération des images
-    shap_images = {}
-
-    # Beeswarm Plot
-    fig_beeswarm = plt.figure(figsize=(15, 8))
-    shap.plots.beeswarm(shap_values, max_display=20, show=False)
-    plt.title("Importance globale des features (Beeswarm Plot)")
-    plt.tight_layout()
-    shap_images['beeswarm_plot'] = fig_beeswarm
-
-    # Bar Plot
-    fig_bar = plt.figure(figsize=(15, 8))
-    shap.plots.bar(shap_values.abs.mean(0), max_display=20, show=False)
-    plt.title("Importance moyenne globale des features (Bar Plot)")
-    plt.tight_layout()
-    shap_images['bar_plot'] = fig_bar
-
-    return shap_images, top_10_features
+        return None
 
 # --- Main App ---
 def main():
@@ -184,28 +100,16 @@ def main():
         s3 = init_s3()
         if s3 is None:
             st.stop()
-
+        
+        # Chargement des données de référence (pour le client existant et la simulation)
         X_train_raw = load_s3_parquet(s3, "X_train.parquet")
-        y_train = load_s3_parquet(s3, "y_train.parquet")
-        if X_train_raw is None or y_train is None:
+        if X_train_raw is None:
             st.stop()
-
-        prediction_pipeline, feature_names = load_s3_model_pipeline()
+        
+        # Chargement du pipeline de prédiction
+        prediction_pipeline = load_s3_model_pipeline()
         if prediction_pipeline is None:
             st.stop()
-
-        preprocessor = prediction_pipeline.named_steps.get('preprocessor')
-        if preprocessor is None:
-            st.error("Le pipeline MLflow n'a pas d'étape 'preprocessor'.")
-            st.stop()
-
-        explainer_model, X_train_processed_df = train_explainer_model(preprocessor, X_train_raw, y_train)
-
-        explainer = create_explainer(explainer_model, X_train_processed_df)
-        expected_value = explainer.expected_value
-
-        # Récupération des plots et des 10 features les plus importantes
-        shap_images, top_10_features = generate_global_shap_plots(explainer, X_train_processed_df)
 
     st.success("Toutes les ressources sont chargées avec succès !")
     st.markdown("---")
@@ -224,11 +128,6 @@ def main():
             with st.spinner("Calcul en cours..."):
                 # PRÉDICTION : Utilise le pipeline MLflow
                 proba = prediction_pipeline.predict_proba(client_data_raw)[0][1]
-
-                # EXPLICATION : Utilise le modèle local de l'explainer
-                client_data_processed = preprocessor.transform(client_data_raw)
-                client_data_processed_df = pd.DataFrame(client_data_processed, columns=X_train_processed_df.columns)
-                shap_values = explainer(client_data_processed_df)
 
                 st.subheader("Résultat de la prédiction")
                 col1, col2 = st.columns(2)
@@ -256,27 +155,20 @@ def main():
                     st.plotly_chart(fig_gauge)
 
                 st.markdown("---")
-                st.subheader("Explication de la prédiction (SHAP)")
+                st.subheader("Explications et analyses (Pré-calculées)")
+                st.info("Les graphiques ci-dessous sont pré-calculés et chargés depuis S3 pour garantir la rapidité de l'application.")
 
-                st.write("**Explication locale (Waterfall Plot)**")
-                fig_shap_waterfall = plt.figure(figsize=(12, 6))
-                shap.plots.waterfall(shap_values[0], max_display=10, show=False)
-                st.pyplot(fig_shap_waterfall, bbox_inches='tight')
-
-                st.markdown("---")
                 global_plots_tab1, global_plots_tab2 = st.tabs(["Explication Globale (Beeswarm)", "Explication Globale (Barres)"])
                 with global_plots_tab1:
-                    st.pyplot(shap_images['beeswarm_plot'], bbox_inches='tight')
+                    st.image(S3_SHAP_BEESWARM_URL, caption="Beeswarm Plot (Global)")
 
                 with global_plots_tab2:
-                    st.pyplot(shap_images['bar_plot'], bbox_inches='tight')
+                    st.image(S3_SHAP_BAR_URL, caption="Bar Plot (Global)")
 
     with tab2:
         st.subheader("Simulation personnalisée")
         with st.form("simulation_form"):
             st.write("Modifiez les valeurs des 10 features ci-dessous pour simuler un nouveau client:")
-
-            # Définition des features à utiliser pour la simulation et leurs libellés
             simulation_features = {
                 "AMT_CREDIT": "Montant du prêt",
                 "AMT_ANNUITY": "Montant Annuité",
@@ -289,21 +181,15 @@ def main():
                 "CNT_CHILDREN": "Nombre d'enfants",
                 "DAYS_BIRTH": "Âge client (jours)"
             }
-
-            # Initialisation du dictionnaire avec les valeurs par défaut
             default_values = X_train_raw.iloc[0].to_dict()
-
             editable_features = {}
             for col, label in simulation_features.items():
                 if col in X_train_raw.columns:
                     min_val = X_train_raw[col].min()
                     max_val = X_train_raw[col].max()
                     default_value = default_values.get(col, X_train_raw[col].mean())
-                    
                     st.write(f"**{label}**")
                     st.write(f"  *Plage de valeurs possibles : de {min_val:.2f} à {max_val:.2f}*")
-                    
-                    # Correction pour les types de données
                     if X_train_raw[col].dtype in ['int64', 'int32']:
                         value_input = st.number_input(
                             'Entrez une valeur',
@@ -324,69 +210,29 @@ def main():
 
             if st.form_submit_button("Prédire le risque"):
                 with st.spinner("Simulation en cours..."):
-                    # Création du DataFrame de simulation avec les valeurs par défaut
                     sim_data_raw = pd.DataFrame([default_values])
-
-                    # Mise à jour des valeurs avec les inputs
                     for feat, val in editable_features.items():
                         sim_data_raw.loc[0, feat] = val
-                    
-                    # Correction des types de colonnes
                     sim_data_raw = sim_data_raw.astype(X_train_raw.dtypes)
 
-                    # PRÉDICTION
                     proba = prediction_pipeline.predict_proba(sim_data_raw)[0][1]
                     st.success(f"**Probabilité de défaut estimée : {proba:.2%}**")
 
-                    # EXPLICATION SHAP
-                    sim_data_processed = preprocessor.transform(sim_data_raw)
-                    sim_data_processed_df = pd.DataFrame(sim_data_processed, columns=X_train_processed_df.columns)
-
-                    shap_values = explainer(sim_data_processed_df)
-
-                    st.write("**Explication de la prédiction pour le client simulé (Waterfall Plot)**")
-                    fig_shap_waterfall_sim = plt.figure(figsize=(12, 6))
-                    shap.plots.waterfall(shap_values[0], max_display=10, show=False)
-                    st.pyplot(fig_shap_waterfall_sim, bbox_inches='tight')
-
                     st.markdown("---")
+                    st.subheader("Explications et analyses (Pré-calculées)")
+                    st.info("Les graphiques ci-dessous sont pré-calculés et chargés depuis S3 pour garantir la rapidité de l'application.")
+
                     global_plots_tab1, global_plots_tab2 = st.tabs(["Explication Globale (Beeswarm)", "Explication Globale (Barres)"])
                     with global_plots_tab1:
-                        st.pyplot(shap_images['beeswarm_plot'], bbox_inches='tight')
+                        st.image(S3_SHAP_BEESWARM_URL, caption="Beeswarm Plot (Global)")
 
                     with global_plots_tab2:
-                        st.pyplot(shap_images['bar_plot'], bbox_inches='tight')
+                        st.image(S3_SHAP_BAR_URL, caption="Bar Plot (Global)")
 
                     st.markdown("---")
-
-                    # --- ANCIENNE LOGIQUE DE GÉNÉRATION DU RAPPORT (SUPPRIMÉE) ---
-                    # with st.spinner("Génération du rapport de dérive des données (Evidently)... Cela peut prendre quelques instants."):
-                    #     st.write("**Analyse de Data Drift (Evidently AI)**")
-                    #     reference_data_for_drift = X_train_processed_df
-                    #     current_data_for_drift = sim_data_processed_df
-                    #     if len(current_data_for_drift) == 1:
-                    #         current_data_for_drift = pd.concat([current_data_for_drift] * 10, ignore_index=True)
-                    #     data_drift_report = Report(metrics=[DataDriftPreset()])
-                    #     data_drift_report.run(
-                    #         reference_data=reference_data_for_drift.sample(n=min(10, len(reference_data_for_drift))),
-                    #         current_data=current_data_for_drift)
-                    #     with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False) as tmpfile:
-                    #         data_drift_report.save_html(tmpfile.name)
-                    #     try:
-                    #         with open(tmpfile.name, 'r', encoding='utf-8') as f:
-                    #             report_html_content = f.read()
-                    #         st.components.v1.html(report_html_content, height=500, scrolling=True)
-                    #     finally:
-                    #         os.remove(tmpfile.name)
-
-                    # --- NOUVELLE LOGIQUE : AFFICHAGE D'UN LIEN VERS LE FICHIER SUR S3 ---
                     st.write("**Analyse de Data Drift (Evidently AI)**")
                     st.info("Le rapport de dérive des données est généré séparément pour optimiser les ressources. Vous pouvez le consulter en cliquant sur le lien ci-dessous.")
-                    
-                    # Assurez-vous que le nom du fichier ici correspond à celui que vous avez téléchargé sur S3.
-                    evidently_report_url = f"https://{BUCKET_NAME}.s3.{os.getenv('AWS_REGION', 'eu-north-1')}.amazonaws.com/reports/evidently_report_10_lignes.html"
-                    st.markdown(f"**[Accéder au rapport Evidently]({evidently_report_url})**")
-
+                    st.markdown(f"**[Accéder au rapport Evidently]({S3_EVIDENTLY_REPORT_URL})**")
 
 if __name__ == "__main__":
     main()
